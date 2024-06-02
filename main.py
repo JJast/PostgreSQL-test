@@ -2,17 +2,18 @@ import psycopg2
 from faker import Faker
 import random
 import time
+import matplotlib.pyplot as plt
 
 # Initialize Faker
 fake = Faker()
 
 # Constants for the amounts of data to generate
-NUM_USERS = 1000
-NUM_COURSES = 200
-NUM_ENROLLMENTS_PER_USER = 20
-NUM_LESSONS_PER_COURSE = 50
-NUM_QUIZZES_PER_LESSON = 20
-NUM_QUESTIONS_PER_QUIZ = 30
+NUM_USERS = 200
+NUM_COURSES = 50
+NUM_ENROLLMENTS_PER_USER = 2
+NUM_LESSONS_PER_COURSE = 5
+NUM_QUIZZES_PER_LESSON = 2
+NUM_QUESTIONS_PER_QUIZ = 3
 
 # Connect to PostgreSQL
 conn = psycopg2.connect(
@@ -26,17 +27,23 @@ conn = psycopg2.connect(
 # Create a cursor
 cur = conn.cursor()
 
+timings = []
+
 def measure_time(operation_name, func):
     start_time = time.time()
     func()
     end_time = time.time()
     duration = end_time - start_time
+    timings.append((operation_name, duration))
     print(f"{operation_name} took {duration:.2f} seconds")
 
 def drop_tables():
-    tables = ["quiz_questions", "quizzes", "lessons", "enrollments", "courses", "users"]
-    for table in tables:
-        cur.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+    cur.execute("DROP TABLE IF EXISTS enrollments")
+    cur.execute("DROP TABLE IF EXISTS quiz_questions")
+    cur.execute("DROP TABLE IF EXISTS quizzes")
+    cur.execute("DROP TABLE IF EXISTS lessons")
+    cur.execute("DROP TABLE IF EXISTS courses")
+    cur.execute("DROP TABLE IF EXISTS users")
     conn.commit()
     print("Tables dropped successfully")
 
@@ -54,8 +61,7 @@ def create_tables():
             id VARCHAR(255) PRIMARY KEY,
             title VARCHAR(255),
             description TEXT,
-            instructor VARCHAR(255),
-            FOREIGN KEY (instructor) REFERENCES users(id)
+            instructor VARCHAR(255)
         )
     """)
     cur.execute("""
@@ -98,17 +104,12 @@ def create_tables():
     conn.commit()
     print("Tables created successfully")
 
-def batch_insert(sql, values):
-    try:
-        cur.executemany(sql, values)
-        conn.commit()
-    except psycopg2.Error as err:
-        print(f"Error: {err}")
-        conn.rollback()
-
 def insert_users():
-    users = [(fake.uuid4(), fake.name(), fake.email(), random.choice(["student", "instructor"])) for _ in range(NUM_USERS)]
-    batch_insert("INSERT INTO users (id, name, email, role) VALUES (%s, %s, %s, %s)", users)
+    for _ in range(NUM_USERS):
+        sql = "INSERT INTO users (id, name, email, role) VALUES (%s, %s, %s, %s)"
+        val = (fake.uuid4(), fake.name(), fake.email(), random.choice(["student", "instructor"]))
+        cur.execute(sql, val)
+    conn.commit()
     print("Users inserted successfully")
 
 def retrieve_users():
@@ -118,49 +119,15 @@ def retrieve_users():
     return users
 
 def insert_courses(users):
-    instructors = [user[0] for user in users if user[3] == "instructor"]
-    courses = [(fake.uuid4(), fake.catch_phrase(), fake.text(), random.choice(instructors)) for _ in range(NUM_COURSES)]
-    batch_insert("INSERT INTO courses (id, title, description, instructor) VALUES (%s, %s, %s, %s)", courses)
-    
-    lessons = []
-    quizzes = []
-    questions = []
-    
-    cur.execute("SELECT id FROM courses")
-    course_ids = [row[0] for row in cur.fetchall()]
-    
-    for course_id in course_ids:
-        for _ in range(NUM_LESSONS_PER_COURSE):
-            lesson_id = fake.uuid4()
-            lessons.append((lesson_id, course_id, fake.sentence(), fake.text()))
-            
-            for _ in range(NUM_QUIZZES_PER_LESSON):
-                quiz_id = fake.uuid4()
-                quizzes.append((quiz_id, lesson_id, fake.sentence()))
-                
-                for _ in range(NUM_QUESTIONS_PER_QUIZ):
-                    question_id = fake.uuid4()
-                    questions.append((question_id, quiz_id, fake.sentence(), fake.word()))
-
-    batch_insert("INSERT INTO lessons (id, course_id, title, content) VALUES (%s, %s, %s, %s)", lessons)
-    batch_insert("INSERT INTO quizzes (id, lesson_id, title) VALUES (%s, %s, %s)", quizzes)
-    batch_insert("INSERT INTO quiz_questions (id, quiz_id, text, correct_answer) VALUES (%s, %s, %s, %s)", questions)
-    
-    print("Courses, lessons, quizzes, and questions inserted successfully")
-
-def generate_enrollments(users):
-    students = [user for user in users if user[3] == "student"]
-    cur.execute("SELECT id FROM courses")
-    course_ids = [row[0] for row in cur.fetchall()]
-
-    enrollments = []
-    for student in students:
-        enrolled_courses = random.sample(course_ids, NUM_ENROLLMENTS_PER_USER)
-        for course_id in enrolled_courses:
-            enrollments.append((fake.uuid4(), student[0], course_id, fake.date_between(start_date='-2y', end_date='today'), f"{random.randint(0, 100)}%"))
-    
-    batch_insert("INSERT INTO enrollments (id, user_id, course_id, enrollment_date, progress) VALUES (%s, %s, %s, %s, %s)", enrollments)
-    print("Enrollments generated successfully")
+    cur.execute("SELECT id FROM users WHERE role = 'instructor'")
+    instructor_ids = cur.fetchall()
+    for _ in range(NUM_COURSES):
+        instructor_id = random.choice(instructor_ids)[0]
+        sql = "INSERT INTO courses (id, title, description, instructor) VALUES (%s, %s, %s, %s)"
+        val = (fake.uuid4(), fake.catch_phrase(), fake.text(), instructor_id)
+        cur.execute(sql, val)
+    conn.commit()
+    print("Courses inserted successfully")
 
 def retrieve_courses():
     cur.execute("SELECT * FROM courses")
@@ -168,15 +135,99 @@ def retrieve_courses():
     print(f"{len(courses)} courses retrieved successfully")
     return courses
 
+def insert_lessons(courses):
+    for course in courses:
+        for _ in range(NUM_LESSONS_PER_COURSE):
+            sql = "INSERT INTO lessons (id, course_id, title, content) VALUES (%s, %s, %s, %s)"
+            val = (fake.uuid4(), course[0], fake.sentence(), fake.text())
+            cur.execute(sql, val)
+    conn.commit()
+    print("Lessons inserted successfully")
+
+def retrieve_lessons():
+    cur.execute("SELECT * FROM lessons")
+    lessons = cur.fetchall()
+    print(f"{len(lessons)} lessons retrieved successfully")
+    return lessons
+
+def insert_quizzes(lessons):
+    for lesson in lessons:
+        for _ in range(NUM_QUIZZES_PER_LESSON):
+            sql = "INSERT INTO quizzes (id, lesson_id, title) VALUES (%s, %s, %s)"
+            val = (fake.uuid4(), lesson[0], fake.sentence())
+            cur.execute(sql, val)
+    conn.commit()
+    print("Quizzes inserted successfully")
+
+def retrieve_quizzes():
+    cur.execute("SELECT * FROM quizzes")
+    quizzes = cur.fetchall()
+    print(f"{len(quizzes)} quizzes retrieved successfully")
+    return quizzes
+
+def insert_quiz_questions(quizzes):
+    for quiz in quizzes:
+        for _ in range(NUM_QUESTIONS_PER_QUIZ):
+            sql = "INSERT INTO quiz_questions (id, quiz_id, text, correct_answer) VALUES (%s, %s, %s, %s)"
+            val = (fake.uuid4(), quiz[0], fake.sentence(), fake.word())
+            cur.execute(sql, val)
+    conn.commit()
+    print("Quiz questions inserted successfully")
+
+def retrieve_quiz_questions():
+    cur.execute("SELECT * FROM quiz_questions")
+    quiz_questions = cur.fetchall()
+    print(f"{len(quiz_questions)} quiz questions retrieved successfully")
+    return quiz_questions
+
+def generate_enrollments(users):
+    for user in users:
+        if user[3] == "student":
+            cur.execute("SELECT id FROM courses ORDER BY random() LIMIT %s", (NUM_ENROLLMENTS_PER_USER,))
+            course_ids = cur.fetchall()
+            for course_id in course_ids:
+                sql = "INSERT INTO enrollments (id, user_id, course_id, enrollment_date, progress) VALUES (%s, %s, %s, %s, %s)"
+                val = (fake.uuid4(), user[0], course_id[0], fake.past_date(), f"{random.randint(0, 100)}%")
+                cur.execute(sql, val)
+    conn.commit()
+    print("Enrollments generated successfully")
+
+def retrieve_enrollments():
+    cur.execute("SELECT * FROM enrollments")
+    enrollments = cur.fetchall()
+    print(f"{len(enrollments)} enrollments retrieved successfully")
+    return enrollments
+
 def main():
     measure_time("Drop Tables", drop_tables)
     measure_time("Create Tables", create_tables)
     measure_time("Insert Users", insert_users)
     users = []
     measure_time("Retrieve Users", lambda: users.extend(retrieve_users()))
-    measure_time("Insert Courses, Lessons, Quizzes, and Questions", lambda: insert_courses(users))
+    measure_time("Insert Courses", lambda: insert_courses(users))
+    courses = []
+    measure_time("Retrieve Courses", lambda: courses.extend(retrieve_courses()))
+    measure_time("Insert Lessons", lambda: insert_lessons(courses))
+    lessons = []
+    measure_time("Retrieve Lessons", lambda: lessons.extend(retrieve_lessons()))
+    measure_time("Insert Quizzes", lambda: insert_quizzes(lessons))
+    quizzes = []
+    measure_time("Retrieve Quizzes", lambda: quizzes.extend(retrieve_quizzes()))
+    measure_time("Insert Quiz Questions", lambda: insert_quiz_questions(quizzes))
+    quiz_questions = []
+    measure_time("Retrieve Quiz Questions", lambda: quiz_questions.extend(retrieve_quiz_questions()))
     measure_time("Generate Enrollments", lambda: generate_enrollments(users))
-    measure_time("Retrieve Courses", retrieve_courses)
+    enrollments = []
+    measure_time("Retrieve Enrollments", lambda: enrollments.extend(retrieve_enrollments()))
+
+    # Plotting the results
+    operations, durations = zip(*timings)
+    plt.figure(figsize=(12, 8))
+    plt.barh(operations, durations, color='skyblue')
+    plt.xlabel('Time (seconds)')
+    plt.title('Performance of PostgreSQL Database Operations')
+    plt.grid(axis='x')
+    plt.show()
     print('Performance test completed')
 
 if __name__ == '__main__':
